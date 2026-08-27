@@ -157,6 +157,10 @@ python _update-report/test_inject_hook.py       # 27 tests
 
 No dependencies — standard library only.
 
+## License
+
+[MIT](LICENSE) — use it, change it, ship it, no strings attached.
+
 ---
 ---
 
@@ -215,3 +219,7 @@ ComfyUI-Easy-Install 처럼 자기 업데이트 스크립트를 통째로 덮어
 - `state.json` 에는 노드 목록과 설치 패키지 버전이 들어갑니다. 로컬에만 남고 gitignore 됩니다.
 - 읽기만 합니다. 저장소에 쓰지 않습니다. 수정하는 파일은 `reinject.bat` 이 훅을 넣는
   업데이트 `.bat` 뿐이고, 그것도 먼저 백업합니다.
+
+## 라이선스
+
+[MIT](LICENSE). 가져다 쓰든 고쳐 쓰든 재배포하든 제약 없습니다.
