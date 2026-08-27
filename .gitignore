@@ -1,0 +1,7 @@
+# Local snapshot and generated reports -- never committed.
+_update-report/state.json
+_update-report/state.json.tmp
+_update-report/reports/
+__pycache__/
+*.pyc
+*.bak-hook
