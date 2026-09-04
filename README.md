@@ -231,6 +231,42 @@ scripts it calls are left alone so the report doesn't run twice.
 
 ---
 
+## Uninstall
+
+Everything lives in the two things you copied, plus the two hook lines. Nothing is
+installed anywhere else — no registry entries, no scheduled tasks, no Python packages.
+
+1. Delete **`Update-Report.bat`** and the **`_update-report`** folder from your ComfyUI
+   install. That also removes the snapshot (`state.json`), the translation cache,
+   `config.json` and every report in `reports\`. Move the folder somewhere else first if
+   you want to keep the old reports.
+
+2. *(optional)* Take the hook back out of your update script. The line is guarded by
+   `if exist`, so once `Update-Report.bat` is gone it already does nothing — removing it
+   is only tidiness. Open each `.bat` that `reinject.bat` reported as `hooked` (typically
+   `Update*.bat` in the install root, or `update\update_comfyui.bat`) and delete these
+   two lines:
+
+   ```bat
+   :: ---- ComfyUI update report ----
+   if exist "%~dp0Update-Report.bat" call "%~dp0Update-Report.bat" --no-pause
+   ```
+
+   In scripts under `update\` the path reads `%~dp0..\Update-Report.bat`.
+
+   Restoring the backup works too — delete the hooked `.bat` and rename its `*.bak-hook`
+   back to the original name. Be aware the backup is written once, the first time the
+   hook goes in; if your distribution has updated that script since, the backup is older
+   than what you have now. Deleting the two lines is the safer choice.
+
+3. *(optional)* Delete the `*.bak-hook` files next to the update scripts.
+
+The report never modified your ComfyUI repository, custom nodes or Python environment,
+so there is nothing to revert there. On Linux/macOS there is no hook: delete
+`_update-report` and `update-report.sh` and you're done.
+
+---
+
 ## Notes and limits
 
 - **First run only saves a baseline.** Real diffs start with the second run.
@@ -389,6 +425,37 @@ ComfyUI-Easy-Install 처럼 자기 업데이트 스크립트를 통째로 덮어
 그러면 넣어둔 훅 두 줄도 같이 날아갑니다. → **`reinject.bat` 을 다시 실행**하면 됩니다
 (몇 번을 돌려도 중복되지 않습니다). 원본은 `*.bak-hook` 으로 백업됩니다.
 훅이 없어도 `Update-Report.bat` 수동 실행은 항상 됩니다.
+
+## 삭제 (언인스톨)
+
+복사해 넣은 파일 둘과 훅 두 줄이 전부입니다. 레지스트리, 예약 작업, 파이썬 패키지 등
+다른 곳에는 아무것도 설치하지 않습니다.
+
+1. ComfyUI 설치 폴더에서 **`Update-Report.bat`** 과 **`_update-report`** 폴더를 지웁니다.
+   스냅샷(`state.json`), 번역 캐시, `config.json`, `reports\` 안의 리포트도 같이
+   사라집니다. 지난 리포트를 남기고 싶으면 폴더를 먼저 다른 곳으로 옮겨두세요.
+
+2. *(선택)* 업데이트 스크립트에서 훅을 뺍니다. 훅 줄은 `if exist` 로 감싸져 있어서
+   `Update-Report.bat` 이 없으면 아무 일도 하지 않습니다. 지우는 건 정리 차원입니다.
+   `reinject.bat` 실행 때 `hooked` 로 표시됐던 `.bat` (보통 설치 폴더 루트의
+   `Update*.bat`, 또는 `update\update_comfyui.bat`)을 열어 다음 두 줄을 지웁니다:
+
+   ```bat
+   :: ---- ComfyUI update report ----
+   if exist "%~dp0Update-Report.bat" call "%~dp0Update-Report.bat" --no-pause
+   ```
+
+   `update\` 안의 스크립트는 경로가 `%~dp0..\Update-Report.bat` 로 되어 있습니다.
+
+   백업으로 되돌려도 됩니다. 훅이 들어간 `.bat` 을 지우고 `*.bak-hook` 의 이름을
+   원래대로 바꾸면 됩니다. 단, 백업은 훅을 처음 넣을 때 한 번만 만들어지므로 그 뒤
+   배포판이 스크립트를 갱신했다면 백업이 지금 것보다 오래된 파일입니다. 두 줄만 지우는
+   쪽이 안전합니다.
+
+3. *(선택)* 업데이트 스크립트 옆의 `*.bak-hook` 파일을 지웁니다.
+
+ComfyUI 저장소, 커스텀 노드, 파이썬 환경은 건드린 적이 없으므로 되돌릴 것이 없습니다.
+리눅스·맥은 훅이 없으니 `_update-report` 폴더와 `update-report.sh` 만 지우면 끝입니다.
 
 ## 알아둘 점
 
