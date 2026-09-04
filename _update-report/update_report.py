@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import i18n          # noqa: E402  (must follow the sys.path fix)
 import translate     # noqa: E402
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # Packages whose version moving under you tends to break ComfyUI outright.
 RISKY_PACKAGES = {
@@ -161,7 +161,7 @@ def _short(sha):
 
 def render_console(d, report_path=None, generated_at=None, color=False,
                    lang=i18n.DEFAULT_LANG, translated=0, model=None,
-                   needs_key=False):
+                   needs_key=False, engine=None, unreachable=False):
     """A few lines for the update window, in one language."""
     lang = i18n.normalize(lang)
 
@@ -205,11 +205,13 @@ def render_console(d, report_path=None, generated_at=None, color=False,
         lines.append(line)
 
     if translated:
+        label = s("engine_google") if engine == "google" else (model or "?")
         lines.append(row(s("c_translate_label"),
-                         _c("d", s("c_translated", n=translated,
-                                   model=model or "?"), color)))
+                         _c("d", s("c_translated", n=translated, model=label), color)))
     elif needs_key:
         lines.append(row(s("c_translate_label"), _c("d", s("c_llm_auth"), color)))
+    elif unreachable and engine == "google":
+        lines.append(row(s("c_translate_label"), _c("d", s("c_google_down"), color)))
     if report_path:
         lines.append(row(s("c_report"), str(report_path)))
     lines.append("")
@@ -383,8 +385,12 @@ def has_translation(d):
     return False
 
 
-def render_html(d, generated_at=None, lang=i18n.DEFAULT_LANG):
-    """The report page. Both languages are in the file; a button picks one."""
+def render_html(d, generated_at=None, lang=i18n.DEFAULT_LANG, engine="google"):
+    """The report page. Both languages are in the file; a button picks one.
+
+    `engine` names what translated the commit subjects ("google" or "llm"),
+    for the small note under the title.
+    """
     lang = i18n.normalize(lang)
     title_ko, title_en = i18n.both("title")
     title = title_ko if lang == "ko" else title_en
@@ -404,7 +410,8 @@ def render_html(d, generated_at=None, lang=i18n.DEFAULT_LANG):
              + _lang_buttons(lang) + "</header>"]
 
     if has_translation(d):
-        parts.append('<p class="mtnote lg-ko">' + _esc(i18n.t("mt_note", "ko")) + "</p>")
+        note = "mt_note_llm" if engine == "llm" else "mt_note_google"
+        parts.append('<p class="mtnote lg-ko">' + _esc(i18n.t(note, "ko")) + "</p>")
 
     if not d["has_changes"]:
         parts.append('<p class="none">' + _s("no_changes") + "</p>")
@@ -655,8 +662,10 @@ USAGE_EN = """ComfyUI update report {version}
   --baseline       overwrite the snapshot without reporting
   --no-open        do not open the HTML report in a browser
   --no-color       plain console output
-  --no-translate   do not translate commit subjects into Korean
-  --llm URL        OpenAI-compatible endpoint for the translation
+  --translator X   what translates commit subjects into Korean:
+                   google (default, no setup) or llm (a local LLM server)
+  --no-translate   do not translate commit subjects at all
+  --llm URL        OpenAI-compatible endpoint; implies --translator llm
                    (default: LM Studio, llama.cpp and Ollama, in that order)
   --llm-model ID   model to translate with (default: whatever is loaded)
   --llm-key KEY    API key, if the server wants one (LM Studio does when its
@@ -665,8 +674,8 @@ USAGE_EN = """ComfyUI update report {version}
   --help           this message
 
   Settings can also live in _update-report/config.json:
-  {{"lang": "ko", "translate": true, "llm_url": null, "llm_model": null,
-    "llm_key": null}}
+  {{"lang": "ko", "translate": true, "translator": "google",
+    "llm_url": null, "llm_model": null, "llm_key": null}}
 """
 
 USAGE_KO = """ComfyUI 업데이트 리포트 {version}
@@ -678,8 +687,10 @@ USAGE_KO = """ComfyUI 업데이트 리포트 {version}
   --baseline       리포트 없이 기준점만 새로 저장
   --no-open        HTML 리포트를 브라우저로 열지 않음
   --no-color       색 없는 콘솔 출력
-  --no-translate   커밋 제목을 한글로 번역하지 않음
-  --llm URL        번역에 쓸 OpenAI 호환 엔드포인트
+  --translator X   커밋 제목을 한글로 번역할 방법:
+                   google (기본, 설정 불필요) 또는 llm (로컬 LLM 서버)
+  --no-translate   커밋 제목을 아예 번역하지 않음
+  --llm URL        OpenAI 호환 엔드포인트. 지정하면 --translator llm 이 됩니다
                    (기본: LM Studio → llama.cpp → Ollama 순으로 탐색)
   --llm-model ID   번역에 쓸 모델 (기본: 로드되어 있는 모델)
   --llm-key KEY    서버가 API 키를 요구할 때 (LM Studio 는 로컬 API 토큰을
@@ -688,8 +699,8 @@ USAGE_KO = """ComfyUI 업데이트 리포트 {version}
   --help           이 도움말
 
   _update-report/config.json 에 설정을 넣어둘 수도 있습니다:
-  {{"lang": "ko", "translate": true, "llm_url": null, "llm_model": null,
-    "llm_key": null}}
+  {{"lang": "ko", "translate": true, "translator": "google",
+    "llm_url": null, "llm_model": null, "llm_key": null}}
 """
 
 
@@ -712,13 +723,17 @@ def _opt(argv, name, default=None):
     return default
 
 
+TRANSLATORS = ("google", "llm")
+_OFF_WORDS = ("0", "off", "false", "no", "none")
+
+
 def resolve_options(argv, config, env=None):
     """Command line beats environment beats config.json beats the defaults."""
     env = os.environ if env is None else env
 
     lang = _opt(argv, "--lang") or env.get("COMFY_REPORT_LANG") or config.get("lang")
     translate_on = config.get("translate", True)
-    if env.get("COMFY_REPORT_TRANSLATE", "").strip().lower() in ("0", "off", "false", "no"):
+    if env.get("COMFY_REPORT_TRANSLATE", "").strip().lower() in _OFF_WORDS:
         translate_on = False
     if "--no-translate" in argv:
         translate_on = False
@@ -728,32 +743,58 @@ def resolve_options(argv, config, env=None):
              or config.get("llm_model"))
     key = (_opt(argv, "--llm-key") or translate.key_from_env(env)
            or config.get("llm_key"))
+
+    # Google Translate unless a local LLM was asked for -- by name, or by
+    # pointing at one.
+    chosen = (_opt(argv, "--translator") or env.get("COMFY_REPORT_TRANSLATOR")
+              or config.get("translator") or "")
+    chosen = str(chosen).strip().lower()
+    if chosen in _OFF_WORDS:
+        translate_on = False
+        chosen = ""
+    if chosen not in TRANSLATORS:
+        chosen = "llm" if (url or model) else "google"
     return {
         "lang": i18n.normalize(lang),
         "translate": bool(translate_on),
+        "translator": chosen,
         "llm_url": url or None,
         "llm_model": model or None,
         "llm_key": key or None,
     }
 
 
+def make_translator(options, cache_path):
+    """The translator the options ask for."""
+    if options.get("translator") == "llm":
+        endpoints = [options["llm_url"]] if options.get("llm_url") else None
+        return translate.LLMTranslator(cache_path=cache_path, endpoints=endpoints,
+                                       model=options.get("llm_model"),
+                                       key=options.get("llm_key"))
+    return translate.GoogleTranslator(cache_path=cache_path)
+
+
 def translate_commits(d, options, cache_path):
     """Korean subjects onto the diff.
 
-    Returns (count, model, needs_key). Never raises: a report without Korean
-    commit subjects is still a report.
+    Returns what the console needs to say about it: {count, engine, model,
+    needs_key, unreachable}. Never raises: a report without Korean commit
+    subjects is still a report.
     """
+    result = {"count": 0, "engine": None, "model": None,
+              "needs_key": False, "unreachable": False}
     if not options["translate"]:
-        return 0, None, False
-    endpoints = [options["llm_url"]] if options["llm_url"] else None
-    translator = translate.Translator(cache_path=cache_path, endpoints=endpoints,
-                                      model=options["llm_model"],
-                                      key=options.get("llm_key"))
+        return result
+    translator = make_translator(options, cache_path)
+    result["engine"] = translator.name
     try:
-        count = translate.apply_to_diff(d, translator)
+        result["count"] = translate.apply_to_diff(d, translator)
     except Exception:
-        return 0, None, False
-    return count, translator.used_model, translator.needs_key
+        return result
+    result["model"] = translator.used_model
+    result["needs_key"] = translator.needs_key
+    result["unreachable"] = translator.unreachable
+    return result
 
 
 def main(argv=None):
@@ -802,18 +843,19 @@ def main(argv=None):
 
     d = diff_state(old_state, new_state)
     enrich_commits(d, comfy_dir)
-    translated, model, needs_key = translate_commits(
-        d, options, os.path.join(here, "translations.json"))
+    tr = translate_commits(d, options, os.path.join(here, "translations.json"))
 
     now = datetime.now()
     report_path = os.path.join(reports_dir, now.strftime("%Y-%m-%d_%H%M") + ".html")
     with io.open(report_path, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(render_html(d, generated_at=now.strftime("%Y-%m-%d %H:%M"), lang=lang))
+        fh.write(render_html(d, generated_at=now.strftime("%Y-%m-%d %H:%M"), lang=lang,
+                             engine=tr["engine"] or options["translator"]))
 
     print(render_console(d, report_path=report_path if d["has_changes"] else None,
                          generated_at=now.strftime("%Y-%m-%d %H:%M"), color=color,
-                         lang=lang, translated=translated, model=model,
-                         needs_key=needs_key))
+                         lang=lang, translated=tr["count"], model=tr["model"],
+                         needs_key=tr["needs_key"], engine=tr["engine"],
+                         unreachable=tr["unreachable"]))
     _save_state(state_path, new_state)
 
     if d["has_changes"] and "--no-open" not in argv:

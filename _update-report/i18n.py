@@ -38,6 +38,9 @@ STRINGS = {
     "c_translated": ("커밋 제목 {n}개 ({model})", "{n} commit subjects ({model})"),
     "c_llm_auth": ("LLM 서버가 API 키를 요구합니다 (--llm-key)",
                    "the LLM server wants an API key (--llm-key)"),
+    "c_google_down": ("Google 번역에 연결하지 못했습니다. 커밋 제목은 영문 그대로입니다.",
+                      "could not reach Google Translate; commit subjects stay in English"),
+    "engine_google": ("Google 번역", "Google Translate"),
 
     # -- html summary cards -------------------------------------------------
     "card_core_commits": ("코어 커밋", "core commits"),
@@ -63,8 +66,10 @@ STRINGS = {
     "pkg_new": ("(신규)", "(new)"),
     "pkg_removed": ("(제거됨)", "(removed)"),
     "lang_hint": ("L 키로 전환", "press L to switch"),
-    "mt_note": ("커밋 제목의 한글은 로컬 LLM 자동 번역입니다.",
-                "Korean commit subjects are machine-translated by a local LLM."),
+    "mt_note_google": ("커밋 제목의 한글은 Google 번역으로 자동 번역한 것입니다.",
+                       "Korean commit subjects are machine-translated by Google Translate."),
+    "mt_note_llm": ("커밋 제목의 한글은 로컬 LLM으로 자동 번역한 것입니다.",
+                    "Korean commit subjects are machine-translated by a local LLM."),
 }
 
 # Not translated: the language buttons name their own language.

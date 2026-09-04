@@ -1,6 +1,7 @@
 {
   "lang": "ko",
   "translate": true,
+  "translator": "google",
   "llm_url": null,
   "llm_model": null,
   "llm_key": null

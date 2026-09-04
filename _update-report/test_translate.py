@@ -15,7 +15,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import translate
-from translate import (Translator, apply_to_diff, discover, load_cache,
+from translate import (GoogleTranslator, LLMTranslator, apply_to_diff, discover,
+                       google_url, load_cache, parse_google,
                        needs_translation, parse_reply, save_cache)
 
 NL = chr(10)
@@ -170,7 +171,7 @@ class TranslateSubjects(unittest.TestCase):
     def translator(self, http, **over):
         options = {"cache_path": self.cache, "endpoints": ["http://a/v1"], "http": http}
         options.update(over)
-        return Translator(**options)
+        return LLMTranslator(**options)
 
     def test_translates_a_subject(self):
         http = FakeHttp({"fix leak": "누수 수정"})
@@ -263,20 +264,20 @@ class TranslateSubjects(unittest.TestCase):
 
     def test_works_without_a_cache_file(self):
         http = FakeHttp({"a": "가"})
-        translator = Translator(cache_path=None, endpoints=["http://a/v1"], http=http)
+        translator = LLMTranslator(cache_path=None, endpoints=["http://a/v1"], http=http)
         self.assertEqual(translator.translate(["a"]), {"a": "가"})
 
 
 class ApiKey(unittest.TestCase):
     def test_sends_the_key_on_every_request(self):
         http = FakeHttp()
-        translator = Translator(endpoints=["http://a/v1"], key="sk-1", http=http)
+        translator = LLMTranslator(endpoints=["http://a/v1"], key="sk-1", http=http)
         translator.translate(["a"])
         self.assertEqual(set(http.keys), {"sk-1"})
 
     def test_sends_nothing_when_there_is_no_key(self):
         http = FakeHttp()
-        Translator(endpoints=["http://a/v1"], http=http).translate(["a"])
+        LLMTranslator(endpoints=["http://a/v1"], http=http).translate(["a"])
         self.assertEqual(set(http.keys), {None})
 
     def test_notes_a_server_that_demands_a_key(self):
@@ -301,12 +302,12 @@ class ApiKey(unittest.TestCase):
             error.code = 403
             raise error
 
-        translator = Translator(endpoints=["http://a/v1"], http=unauthorized)
+        translator = LLMTranslator(endpoints=["http://a/v1"], http=unauthorized)
         self.assertEqual(translator.translate(["a"]), {})
         self.assertTrue(translator.needs_key)
 
     def test_a_reachable_server_is_not_an_auth_problem(self):
-        translator = Translator(endpoints=["http://a/v1"], http=FakeHttp())
+        translator = LLMTranslator(endpoints=["http://a/v1"], http=FakeHttp())
         translator.translate(["a"])
         self.assertFalse(translator.needs_key)
 
@@ -331,37 +332,211 @@ class ApiKey(unittest.TestCase):
         self.assertIsNone(translate.status_of(IOError("plain")))
 
 
+class Reachability(unittest.TestCase):
+    def test_a_silent_server_counts_as_unreachable(self):
+        translator = LLMTranslator(endpoints=["http://a/v1"], http=FakeHttp(fail_on=["http"]))
+        translator.translate(["a"])
+        self.assertTrue(translator.unreachable)
+
+    def test_a_server_that_answered_does_not(self):
+        translator = LLMTranslator(endpoints=["http://a/v1"], http=FakeHttp())
+        translator.translate(["a"])
+        self.assertFalse(translator.unreachable)
+
+    def test_nothing_to_ask_is_not_unreachable(self):
+        translator = LLMTranslator(endpoints=["http://a/v1"], http=FakeHttp(fail_on=["http"]))
+        translator.translate(["이미 한글"])
+        self.assertFalse(translator.unreachable)
+
+
+# ---------------------------------------------------------------- google --
+
+def gtx_body(text, answers):
+    """A translate_a/single reply: one segment per input line, newline kept."""
+    lines = text.split(NL)
+    segments = []
+    for index, line in enumerate(lines):
+        tail = NL if index < len(lines) - 1 else ""
+        korean = answers.get(line, "번역:" + line)
+        segments.append([korean + tail, line + tail, None, None, 10])
+    return [segments, None, "en", None, None, None, None, []]
+
+
+class FakeGoogle(object):
+    """translate.googleapis.com, minus the network."""
+
+    def __init__(self, answers=None, merge_lines=False, blocked=False):
+        self.answers = answers or {}
+        self.merge_lines = merge_lines
+        self.blocked = blocked
+        self.texts = []
+        self.keys = []
+
+    def __call__(self, url, payload=None, timeout=None, key=None):
+        self.keys.append(key)
+        if self.blocked:
+            raise ValueError("a 'Sorry...' HTML page is not JSON")
+        query = translate.urlparse.parse_qs(translate.urlparse.urlsplit(url).query)
+        text = query["q"][0]
+        self.texts.append(text)
+        body = gtx_body(text, self.answers)
+        if self.merge_lines:
+            # Google occasionally folds a line break into a space.
+            merged = "".join(seg[0] for seg in body[0]).replace(NL, " ")
+            body = [[[merged, text, None, None, 10]], None, "en"]
+        return body
+
+
+class GoogleUrl(unittest.TestCase):
+    def test_targets_korean_through_the_gtx_client(self):
+        url = google_url("Fix a leak")
+        self.assertTrue(url.startswith(translate.GOOGLE_ENDPOINT + "?"))
+        for fragment in ("client=gtx", "tl=ko", "dt=t", "sl=auto"):
+            self.assertIn(fragment, url)
+
+    def test_encodes_the_text(self):
+        self.assertIn("q=Fix+a+leak+%26+more", google_url("Fix a leak & more"))
+
+
+class ParseGoogle(unittest.TestCase):
+    def test_joins_the_segments(self):
+        body = [[["누수 수정. ", "Fix leak. ", None, None, 10],
+                 ["끝", "Done", None, None, 10]], None, "en"]
+        self.assertEqual(parse_google(body), "누수 수정. 끝")
+
+    def test_keeps_line_breaks_between_segments(self):
+        self.assertEqual(parse_google(gtx_body("a" + NL + "b", {"a": "가", "b": "나"})),
+                         "가" + NL + "나")
+
+    def test_accepts_the_bare_string_shape(self):
+        self.assertEqual(parse_google(["번역"]), "번역")
+
+    def test_rejects_anything_else(self):
+        for junk in (None, {}, [], [None], [[]], "text", [[[1]]]):
+            self.assertIsNone(parse_google(junk), repr(junk))
+
+
+class GoogleTranslate(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.cache = os.path.join(self.dir, "translations.json")
+
+    def translator(self, http, **over):
+        options = {"cache_path": self.cache, "http": http}
+        options.update(over)
+        return GoogleTranslator(**options)
+
+    def test_translates_a_subject(self):
+        http = FakeGoogle({"Fix leak": "누수 수정"})
+        self.assertEqual(self.translator(http).translate(["Fix leak"]),
+                         {"Fix leak": "누수 수정"})
+
+    def test_sends_a_batch_as_one_request_line_by_line(self):
+        http = FakeGoogle()
+        self.translator(http).translate(["a", "b", "c"])
+        self.assertEqual(http.texts, ["a" + NL + "b" + NL + "c"])
+
+    def test_falls_back_to_one_request_per_subject_when_lines_get_merged(self):
+        http = FakeGoogle({"a": "가", "b": "나"}, merge_lines=True)
+        done = self.translator(http).translate(["a", "b"])
+        self.assertEqual(http.texts, ["a" + NL + "b", "a", "b"])
+        self.assertEqual(done, {"a": "가", "b": "나"})
+
+    def test_splits_a_batch_by_subject_count(self):
+        http = FakeGoogle()
+        self.translator(http, batch=2).translate(["a", "b", "c"])
+        self.assertEqual(http.texts, ["a" + NL + "b", "c"])
+
+    def test_splits_a_batch_by_size(self):
+        http = FakeGoogle()
+        self.translator(http, max_chars=12).translate(["a" * 8, "b" * 8, "c"])
+        self.assertEqual(http.texts, ["a" * 8, "b" * 8 + NL + "c"])
+
+    def test_needs_no_key_and_no_discovery(self):
+        http = FakeGoogle()
+        self.translator(http).translate(["a"])
+        self.assertEqual(http.keys, [None])
+        self.assertEqual(len(http.texts), 1)
+
+    def test_writes_what_it_learned_to_the_cache(self):
+        self.translator(FakeGoogle({"a": "가"})).translate(["a"])
+        self.assertEqual(load_cache(self.cache), {"a": "가"})
+
+    def test_a_cached_subject_costs_no_request(self):
+        save_cache(self.cache, {"a": "가"})
+        http = FakeGoogle()
+        self.assertEqual(self.translator(http).translate(["a"]), {"a": "가"})
+        self.assertEqual(http.texts, [])
+
+    def test_an_answer_identical_to_the_original_is_not_stored(self):
+        http = FakeGoogle({"ComfyUI": "ComfyUI"})
+        self.assertEqual(self.translator(http).translate(["ComfyUI"]), {})
+        self.assertEqual(load_cache(self.cache), {})
+
+    def test_a_blocked_endpoint_means_no_translation_and_no_crash(self):
+        translator = self.translator(FakeGoogle(blocked=True))
+        self.assertEqual(translator.translate(["a"]), {})
+        self.assertTrue(translator.unreachable)
+        self.assertFalse(translator.needs_key)
+
+    def test_knows_what_it_is(self):
+        translator = self.translator(FakeGoogle())
+        self.assertEqual(translator.name, "google")
+        self.assertEqual(translator.used_model, translate.GOOGLE_LABEL)
+
+    def test_counts_what_it_translated(self):
+        translator = self.translator(FakeGoogle())
+        translator.translate(["a", "b"])
+        self.assertEqual(translator.translated, 2)
+
+    def test_stops_when_the_time_budget_runs_out(self):
+        ticks = iter([0.0, 0.0, 99.0, 99.0, 99.0])
+        http = FakeGoogle()
+        translator = self.translator(http, batch=1, budget=10.0,
+                                     clock=lambda: next(ticks))
+        translator.translate(["a", "b", "c"])
+        self.assertEqual(http.texts, ["a"])
+
+    def test_works_without_a_cache_file(self):
+        translator = GoogleTranslator(cache_path=None, http=FakeGoogle({"a": "가"}))
+        self.assertEqual(translator.translate(["a"]), {"a": "가"})
+
+    def test_uses_the_real_endpoint_by_default(self):
+        self.assertIs(GoogleTranslator().http, translate.http_json)
+
+
 class ApplyToDiff(unittest.TestCase):
     def diff(self, core=None, nodes=None):
         return {"core": core, "nodes_changed": nodes or []}
 
     def test_attaches_korean_to_a_core_commit(self):
         d = self.diff(core={"commits": [{"subject": "a"}]})
-        apply_to_diff(d, Translator(endpoints=["http://a/v1"],
+        apply_to_diff(d, LLMTranslator(endpoints=["http://a/v1"],
                                     http=FakeHttp({"a": "가"})))
         self.assertEqual(d["core"]["commits"][0]["subject_ko"], "가")
 
     def test_attaches_korean_to_a_node_commit(self):
         d = self.diff(nodes=[{"commits": [{"subject": "a"}]}])
-        apply_to_diff(d, Translator(endpoints=["http://a/v1"],
+        apply_to_diff(d, LLMTranslator(endpoints=["http://a/v1"],
                                     http=FakeHttp({"a": "가"})))
         self.assertEqual(d["nodes_changed"][0]["commits"][0]["subject_ko"], "가")
 
     def test_leaves_an_untranslated_commit_alone(self):
         d = self.diff(core={"commits": [{"subject": "a"}]})
-        apply_to_diff(d, Translator(endpoints=["http://a/v1"],
+        apply_to_diff(d, LLMTranslator(endpoints=["http://a/v1"],
                                     http=FakeHttp(fail_on=["http"])))
         self.assertNotIn("subject_ko", d["core"]["commits"][0])
 
     def test_a_diff_without_commits_asks_nothing(self):
         http = FakeHttp()
         d = self.diff(nodes=[{"name": "n"}])
-        self.assertEqual(apply_to_diff(d, Translator(http=http)), 0)
+        self.assertEqual(apply_to_diff(d, LLMTranslator(http=http)), 0)
         self.assertEqual(http.calls, [])
 
     def test_returns_the_number_translated(self):
         d = self.diff(core={"commits": [{"subject": "a"}, {"subject": "b"}]})
-        count = apply_to_diff(d, Translator(endpoints=["http://a/v1"], http=FakeHttp()))
+        count = apply_to_diff(d, LLMTranslator(endpoints=["http://a/v1"], http=FakeHttp()))
         self.assertEqual(count, 2)
 
 

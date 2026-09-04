@@ -315,14 +315,34 @@ class ConsoleLanguage(unittest.TestCase):
     def test_reports_the_translation_count_when_there_was_one(self):
         out = render_console(diff(core={"old": "a", "new": "b", "remote": None,
                                         "commits": []}),
-                             translated=7, model="qwen3")
+                             translated=7, model="qwen3", engine="llm")
         self.assertIn("7", out)
         self.assertIn("qwen3", out)
+
+    def test_names_google_translate_in_the_console_language(self):
+        d = diff(core={"old": "a", "new": "b", "remote": None, "commits": []})
+        self.assertIn("Google 번역", render_console(d, translated=7, engine="google",
+                                                   model="Google Translate"))
+        self.assertIn("Google Translate", render_console(d, translated=7, engine="google",
+                                                         model="Google Translate",
+                                                         lang="en"))
 
     def test_says_the_server_wanted_a_key(self):
         out = render_console(diff(core={"old": "a", "new": "b", "remote": None,
                                         "commits": []}), needs_key=True)
         self.assertIn("API", out)
+
+    def test_says_when_google_could_not_be_reached(self):
+        d = diff(core={"old": "a", "new": "b", "remote": None, "commits": []})
+        self.assertIn("Google 번역에 연결하지", render_console(d, engine="google",
+                                                             unreachable=True))
+        self.assertIn("could not reach", render_console(d, engine="google",
+                                                        unreachable=True, lang="en"))
+
+    def test_an_unreachable_llm_stays_quiet(self):
+        out = render_console(diff(core={"old": "a", "new": "b", "remote": None,
+                                        "commits": []}), engine="llm", unreachable=True)
+        self.assertNotIn("번역", out)
 
     def test_says_nothing_about_translation_when_there_was_none(self):
         out = render_console(diff(core={"old": "a", "new": "b", "remote": None,
@@ -394,6 +414,16 @@ class RenderHtmlLanguage(unittest.TestCase):
         page = render_html(diff(core=core_with(commit("x", "엑스"))))
         self.assertIn("자동 번역", page)
 
+    def test_credits_google_translate_by_default(self):
+        page = render_html(diff(core=core_with(commit("x", "엑스"))))
+        self.assertIn("Google 번역으로 자동 번역", page)
+        self.assertNotIn("LLM", page)
+
+    def test_credits_the_local_llm_when_that_translated(self):
+        page = render_html(diff(core=core_with(commit("x", "엑스"))), engine="llm")
+        self.assertIn("로컬 LLM으로 자동 번역", page)
+        self.assertNotIn("Google", page)
+
     def test_says_nothing_about_machine_translation_otherwise(self):
         page = render_html(diff(core=core_with(commit("x"))))
         self.assertNotIn("자동 번역", page)
@@ -463,19 +493,83 @@ class ResolveOptions(unittest.TestCase):
     def test_a_dangling_option_does_not_crash(self):
         self.assertEqual(self.resolve(["--lang"])["lang"], "ko")
 
+    def test_google_translate_is_the_default_translator(self):
+        self.assertEqual(self.resolve()["translator"], "google")
+
+    def test_reads_the_translator_from_the_command_line(self):
+        self.assertEqual(self.resolve(["--translator", "llm"])["translator"], "llm")
+
+    def test_reads_the_translator_from_the_environment(self):
+        options = self.resolve(env={"COMFY_REPORT_TRANSLATOR": "LLM"})
+        self.assertEqual(options["translator"], "llm")
+
+    def test_reads_the_translator_from_the_config_file(self):
+        self.assertEqual(self.resolve(config={"translator": "llm"})["translator"], "llm")
+
+    def test_pointing_at_an_llm_selects_it(self):
+        self.assertEqual(self.resolve(["--llm", "http://x/v1"])["translator"], "llm")
+        self.assertEqual(self.resolve(["--llm-model", "m"])["translator"], "llm")
+        self.assertEqual(self.resolve(config={"llm_url": "http://x/v1"})["translator"],
+                         "llm")
+
+    def test_an_explicit_translator_beats_an_llm_url(self):
+        options = self.resolve(["--translator", "google"], {"llm_url": "http://x/v1"})
+        self.assertEqual(options["translator"], "google")
+
+    def test_a_key_alone_does_not_select_the_llm(self):
+        self.assertEqual(self.resolve(["--llm-key", "sk-1"])["translator"], "google")
+
+    def test_an_unknown_translator_falls_back_to_google(self):
+        self.assertEqual(self.resolve(["--translator", "deepl"])["translator"], "google")
+
+    def test_translator_none_turns_translation_off(self):
+        options = self.resolve(["--translator", "none"])
+        self.assertFalse(options["translate"])
+        self.assertEqual(options["translator"], "google")
+
+
+class MakeTranslator(unittest.TestCase):
+    def test_google_by_default(self):
+        translator = update_report.make_translator({"translator": "google"}, None)
+        self.assertIsInstance(translator, translate_module.GoogleTranslator)
+
+    def test_the_llm_when_asked(self):
+        translator = update_report.make_translator(
+            {"translator": "llm", "llm_url": "http://x/v1", "llm_model": "m",
+             "llm_key": "k"}, None)
+        self.assertIsInstance(translator, translate_module.LLMTranslator)
+        self.assertEqual((translator.endpoints, translator.model, translator.key),
+                         (["http://x/v1"], "m", "k"))
+
+    def test_the_llm_probes_the_usual_ports_without_a_url(self):
+        translator = update_report.make_translator({"translator": "llm"}, None)
+        self.assertIsNone(translator.endpoints)
+
 
 class TranslateCommits(unittest.TestCase):
     def options(self, **over):
-        base = {"lang": "ko", "translate": True, "llm_url": None, "llm_model": None}
+        base = {"lang": "ko", "translate": True, "translator": "google",
+                "llm_url": None, "llm_model": None}
         base.update(over)
         return base
 
     def test_does_nothing_when_translation_is_off(self):
         d = diff(core=core_with(commit("x")))
-        self.assertEqual(
-            update_report.translate_commits(d, self.options(translate=False), None),
-            (0, None, False))
+        result = update_report.translate_commits(d, self.options(translate=False), None)
+        self.assertEqual((result["count"], result["engine"]), (0, None))
         self.assertNotIn("subject_ko", d["core"]["commits"][0])
+
+    def test_names_the_engine_it_used(self):
+        original = update_report.make_translator
+        update_report.make_translator = lambda options, cache_path: (
+            translate_module.GoogleTranslator(http=lambda *a, **k: [["x"]]))
+        try:
+            result = update_report.translate_commits(
+                diff(core=core_with(commit("x"))), self.options(), None)
+        finally:
+            update_report.make_translator = original
+        self.assertEqual(result["engine"], "google")
+        self.assertEqual(result["model"], translate_module.GOOGLE_LABEL)
 
     def test_survives_a_translator_that_explodes(self):
         def boom(*args, **kwargs):
@@ -485,10 +579,11 @@ class TranslateCommits(unittest.TestCase):
         original = translate_module.apply_to_diff
         translate_module.apply_to_diff = boom
         try:
-            self.assertEqual(update_report.translate_commits(d, self.options(), None),
-                             (0, None, False))
+            result = update_report.translate_commits(d, self.options(), None)
         finally:
             translate_module.apply_to_diff = original
+        self.assertEqual(result["count"], 0)
+        self.assertFalse(result["unreachable"])
 
 
 class LoadConfig(unittest.TestCase):
