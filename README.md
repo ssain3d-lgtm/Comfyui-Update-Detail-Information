@@ -13,12 +13,21 @@ This adds one line to your update script. After every update you get:
   core        30d03fea -> d8e7bbc9  (4 commits)
   nodes       changed 2 / added 1 / removed 1
   packages    changed 2  [!] av 16.0.1 -> 17.0.1
+  translated  12 commit subjects (qwen3.5-9b)
   report      ...\_update-report\reports\2026-08-27_1718.html
 ```
+
+*(shown with `--lang en`; the console speaks Korean unless you ask otherwise)*
 
 …and a full HTML page that opens in your browser: every core commit with its subject
 and date, every node that moved with a GitHub compare link, every package version
 change, with the ones that habitually break ComfyUI flagged.
+
+**Korean and English, in one page.** The report ships both languages and switches
+between them with the `한국어 / English` buttons in the corner — or the `L` key. Your
+choice is remembered for every later report. It opens in Korean; `--lang en` changes
+that. If a local LLM is running (LM Studio, llama.cpp, Ollama), commit subjects are
+translated too — see [Korean commit subjects](#korean-commit-subjects).
 
 **Nothing has to run before an update.** The previous report's snapshot is the baseline.
 
@@ -100,17 +109,62 @@ startup with no clue which update caused it.
 ```
 Update-Report.bat [options]
 
-  --comfy PATH   path to the ComfyUI directory (auto-detected otherwise)
-  --baseline     overwrite the snapshot without reporting
-  --no-open      don't open the HTML report in a browser
-  --no-color     plain console output
-  --no-pause     don't wait for a keypress (used by the hook)
-  --reinject     re-add the hook to your update scripts
-  --help         show this
+  --comfy PATH     path to the ComfyUI directory (auto-detected otherwise)
+  --lang ko|en     console language, and the language the report opens in (default: ko)
+  --baseline       overwrite the snapshot without reporting
+  --no-open        don't open the HTML report in a browser
+  --no-color       plain console output
+  --no-pause       don't wait for a keypress (used by the hook)
+  --no-translate   don't translate commit subjects into Korean
+  --llm URL        OpenAI-compatible endpoint for the translation
+  --llm-model ID   model to translate with
+  --llm-key KEY    API key, if the server wants one
+  --reinject       re-add the hook to your update scripts
+  --help           show this
 ```
+
+The hook passes no options, so put anything you want to be permanent in
+`_update-report\config.json` (copy `config.example.json`):
+
+```json
+{ "lang": "en", "translate": true, "llm_url": null, "llm_model": null, "llm_key": null }
+```
+
+Command line beats `COMFY_REPORT_LANG` / `COMFY_REPORT_LLM` / `COMFY_REPORT_LLM_KEY`
+in the environment, which beats `config.json`.
 
 Reports pile up in `_update-report\reports\` as `YYYY-MM-DD_HHMM.html`. They're a few KB
 each; delete them whenever.
+
+---
+
+## Korean commit subjects
+
+The page's own wording is written in both languages. Commit subjects come from git, so
+they arrive in whatever the upstream author wrote — usually English. If an
+OpenAI-compatible LLM is reachable, they are translated as well, and the Korean side of
+the toggle shows the translation with the original still one keypress away.
+
+These are probed in order, and the first one that answers is used:
+
+| Server | Endpoint |
+|---|---|
+| LM Studio | `http://127.0.0.1:1234/v1` |
+| llama.cpp (`llama-server`) | `http://127.0.0.1:8080/v1` |
+| Ollama | `http://127.0.0.1:11434/v1` |
+
+Nothing listening? Nothing happens — the report is built exactly as before, in English,
+with no delay worth measuring (a closed local port refuses instantly). Point it somewhere
+else with `--llm`, pick the model with `--llm-model`, or turn it off with `--no-translate`.
+
+If the server wants an API key — LM Studio does once its local API token is switched on —
+pass `--llm-key`, or set `COMFY_REPORT_LLM_KEY` / `LM_API_TOKEN` / `OPENAI_API_KEY`. The
+console says so when a server turns the request down instead of failing silently.
+
+Translations are cached in `_update-report\translations.json`, so a subject is only ever
+paid for once. Model names, file paths, flags and version numbers are left in English on
+purpose. It is machine translation, and the page says so — the original subject is always
+in the file.
 
 ---
 
@@ -151,11 +205,13 @@ scripts it calls are left alone so the report doesn't run twice.
 ## Tests
 
 ```
-python _update-report/test_update_report.py     # 73 tests
-python _update-report/test_inject_hook.py       # 27 tests
+python _update-report/test_update_report.py     # 114 tests
+python _update-report/test_translate.py         #  55 tests
+python _update-report/test_inject_hook.py       #  27 tests
+python _update-report/test_i18n.py              #  21 tests
 ```
 
-No dependencies — standard library only.
+No dependencies — standard library only. The translation tests never touch the network.
 
 ## License
 
@@ -175,6 +231,20 @@ ComfyUI를 업데이트하면 뭐가 바뀌었는지 알 수가 없습니다. `g
 이 도구는 업데이트 스크립트에 한 줄을 넣어서, 업데이트가 끝나면 자동으로 변경내역을
 보여줍니다. 콘솔에는 요약 세 줄, 브라우저에는 상세 페이지 — 코어 커밋 전체(날짜·SHA·제목),
 바뀐 노드마다 GitHub compare 링크, 패키지 버전 변화까지.
+
+**한글과 영문이 한 파일에 같이 들어갑니다.** 리포트 오른쪽 위 `한국어 / English` 버튼,
+또는 **`L` 키**로 언제든 바꿀 수 있고, 고른 언어는 다음 리포트에서도 그대로 유지됩니다.
+기본값은 한글이고 `--lang en` 으로 바꿉니다. 로컬 LLM(LM Studio·llama.cpp·Ollama)이
+켜져 있으면 **커밋 제목까지 한글로 번역**합니다 — 아래 [커밋 제목 번역](#커밋-제목-번역) 참고.
+
+```
+::::::::::: ComfyUI 업데이트 리포트 (2026-08-27 17:18) :::::::::::
+  코어        30d03fea -> d8e7bbc9  (커밋 4개)
+  노드        변경 2 / 추가 1 / 제거 1
+  패키지      변경 2  [!] av 16.0.1 -> 17.0.1
+  번역        커밋 제목 12개 (qwen3.5-9b)
+  리포트      ...\_update-report\reports\2026-08-27_1718.html
+```
 
 **업데이트 전에 미리 실행해둘 필요가 없습니다.** 직전 리포트의 스냅샷이 기준점입니다.
 
@@ -203,6 +273,43 @@ ComfyUI를 업데이트하면 뭐가 바뀌었는지 알 수가 없습니다. `g
 `av` `numpy` `scipy` `torch*` `opencv*` `numba` 같은 **위험 패키지**는 따로 강조합니다.
 업데이트 스크립트가 `av` 를 16.0.1로 계속 되돌려놓는 바람에 ComfyUI가 `ImportError` 로
 안 뜨는데 어느 업데이트가 원인인지 알 수 없었던 실제 사고에서 나온 목록입니다.
+
+## 커밋 제목 번역
+
+리포트의 UI 문구는 한/영이 처음부터 둘 다 들어 있습니다. 커밋 제목은 git 에서 그대로
+가져오는 것이라 대개 영문인데, OpenAI 호환 LLM 서버가 켜져 있으면 그것도 한글로 번역해서
+같이 넣습니다. 토글을 영문으로 돌리면 원문이 그대로 나옵니다.
+
+아래 순서로 찾아보고, 먼저 응답하는 쪽을 씁니다.
+
+| 서버 | 주소 |
+|---|---|
+| LM Studio | `http://127.0.0.1:1234/v1` |
+| llama.cpp (`llama-server`) | `http://127.0.0.1:8080/v1` |
+| Ollama | `http://127.0.0.1:11434/v1` |
+
+아무것도 안 켜져 있으면 그냥 번역 없이(=영문 그대로) 리포트가 나옵니다. 닫힌 로컬 포트는
+즉시 거절되기 때문에 느려지지도 않습니다. 다른 주소는 `--llm`, 모델 지정은 `--llm-model`,
+아예 끄려면 `--no-translate` 입니다.
+
+**LM Studio 는 설정에서 로컬 API 토큰을 켜두면 키를 요구합니다.** 그때는 `--llm-key`
+(또는 환경변수 `COMFY_REPORT_LLM_KEY` / `LM_API_TOKEN` / `OPENAI_API_KEY`)로 넘기세요.
+키 때문에 거절당하면 콘솔에 그렇다고 찍힙니다. 조용히 넘어가지 않습니다.
+
+번역 결과는 `_update-report\translations.json` 에 캐시되어 같은 커밋을 두 번 번역하지
+않습니다. 모델명·파일 경로·옵션·버전 숫자는 일부러 영문 그대로 둡니다. 기계 번역이므로
+리포트에도 그렇게 적어두고, 원문은 항상 파일 안에 함께 들어 있습니다.
+
+## 고정 설정
+
+훅은 옵션 없이 실행되기 때문에, 계속 쓸 설정은 `_update-report\config.json` 에 둡니다
+(`config.example.json` 복사):
+
+```json
+{ "lang": "ko", "translate": true, "llm_url": null, "llm_model": null, "llm_key": null }
+```
+
+우선순위는 명령줄 > 환경변수 > `config.json` 입니다.
 
 ## 훅이 사라졌을 때
 

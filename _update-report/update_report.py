@@ -22,7 +22,14 @@ try:
 except ImportError:  # Python < 3.11
     tomllib = None
 
-__version__ = "1.0.0"
+# An embedded python (._pth) may not put the script directory on sys.path,
+# and the report is launched by absolute path from the update .bat files.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import i18n          # noqa: E402  (must follow the sys.path fix)
+import translate     # noqa: E402
+
+__version__ = "1.1.0"
 
 # Packages whose version moving under you tends to break ComfyUI outright.
 RISKY_PACKAGES = {
@@ -141,6 +148,7 @@ def compare_url(remote, old, new):
 # -------------------------------------------------------------- rendering --
 
 _ANSI = {"g": "\033[92m", "y": "\033[93m", "r": "\033[91m", "d": "\033[90m", "0": "\033[0m"}
+LABEL_COLUMNS = 12
 
 
 def _c(code, text, color):
@@ -151,31 +159,44 @@ def _short(sha):
     return (sha or "?")[:8]
 
 
-def render_console(d, report_path=None, generated_at=None, color=False):
-    """A few ASCII lines for the update window."""
-    title = "ComfyUI update report"
+def render_console(d, report_path=None, generated_at=None, color=False,
+                   lang=i18n.DEFAULT_LANG, translated=0, model=None,
+                   needs_key=False):
+    """A few lines for the update window, in one language."""
+    lang = i18n.normalize(lang)
+
+    def s(key, **fmt):
+        return i18n.t(key, lang, **fmt)
+
+    def row(label, body):
+        return "  " + i18n.pad(label, LABEL_COLUMNS) + body
+
+    title = s("title")
     if generated_at:
         title += " (" + generated_at + ")"
     lines = ["", _c("g", "::::::::::: " + title + " :::::::::::", color)]
 
     if not d["has_changes"]:
-        lines += ["  " + _c("d", "No changes since the last report.", color), ""]
+        lines += ["  " + _c("d", s("no_changes"), color), ""]
         return "\n".join(lines)
 
     core = d["core"]
     if core:
         n = len(core.get("commits") or [])
-        count = "{} commits".format(n) if n else "commit list unavailable"
-        lines.append("  core        {} -> {}  ({})".format(
-            _short(core["old"]), _c("y", _short(core["new"]), color), count))
+        count = s("c_commits", n=n) if n else s("c_commits_none")
+        lines.append(row(s("c_core"), "{} -> {}  ({})".format(
+            _short(core["old"]), _c("y", _short(core["new"]), color), count)))
 
     if d["nodes_changed"] or d["nodes_added"] or d["nodes_removed"]:
-        lines.append("  nodes       changed {} / added {} / removed {}".format(
-            len(d["nodes_changed"]), len(d["nodes_added"]), len(d["nodes_removed"])))
+        lines.append(row(s("c_nodes"), s("c_node_counts",
+                                         changed=len(d["nodes_changed"]),
+                                         added=len(d["nodes_added"]),
+                                         removed=len(d["nodes_removed"]))))
 
-    pkg_total = len(d["packages_changed"]) + len(d["packages_added"]) + len(d["packages_removed"])
+    pkg_total = (len(d["packages_changed"]) + len(d["packages_added"])
+                 + len(d["packages_removed"]))
     if pkg_total:
-        line = "  packages    changed {}".format(pkg_total)
+        line = row(s("c_packages"), s("c_pkg_counts", n=pkg_total))
         risky = [p for p in d["packages_changed"] if p.get("risky")]
         if risky:
             detail = ", ".join("{} {} -> {}".format(p["name"], p["old"], p["new"])
@@ -183,8 +204,14 @@ def render_console(d, report_path=None, generated_at=None, color=False):
             line += "  " + _c("r", "[!] " + detail, color)
         lines.append(line)
 
+    if translated:
+        lines.append(row(s("c_translate_label"),
+                         _c("d", s("c_translated", n=translated,
+                                   model=model or "?"), color)))
+    elif needs_key:
+        lines.append(row(s("c_translate_label"), _c("d", s("c_llm_auth"), color)))
     if report_path:
-        lines.append("  report      " + str(report_path))
+        lines.append(row(s("c_report"), str(report_path)))
     lines.append("")
     return "\n".join(lines)
 
@@ -193,15 +220,30 @@ def _esc(text):
     return html.escape(str(text) if text is not None else "")
 
 
+def _bi(ko, en):
+    """Ship both languages; the browser hides one. Identical text stays plain."""
+    ko_text, en_text = _esc(ko), _esc(en)
+    if ko_text == en_text:
+        return ko_text
+    return ('<span class="lg-ko">{}</span>'
+            '<span class="lg-en">{}</span>').format(ko_text, en_text)
+
+
+def _s(key, **fmt):
+    """A table string in both languages."""
+    return _bi(*i18n.both(key, **fmt))
+
+
 def _commit_rows(commits, extra_count=0):
     if not commits:
-        return ('<p class="none">Commit list unavailable '
-                "(force push, shallow clone, or the old commit is gone).</p>")
+        return '<p class="none">' + _s("commits_none") + "</p>"
     rows = "".join(
         '<tr><td class="date">{}</td><td class="sha">{}</td><td>{}</td></tr>'.format(
-            _esc(c["date"]), _esc(c["sha"]), _esc(c["subject"])) for c in commits)
-    more = ('<tr><td></td><td></td><td class="none">... and {} more</td></tr>'.format(extra_count)
-            if extra_count else "")
+            _esc(c["date"]), _esc(c["sha"]),
+            _bi(c.get("subject_ko") or c.get("subject"), c.get("subject")))
+        for c in commits)
+    more = ('<tr><td></td><td></td><td class="none">{}</td></tr>'.format(
+        _s("more_commits", n=extra_count)) if extra_count else "")
     return '<table class="commits">' + rows + more + "</table>"
 
 
@@ -236,7 +278,20 @@ _CSS = """
 body{background:#14161a;color:#dde2e8;font:14px/1.6 "Segoe UI",Malgun Gothic,sans-serif;
      margin:0;padding:32px 28px 64px;max-width:1100px}
 h1{font-size:20px;margin:0 0 4px}
-.meta{color:#7c8794;font-size:12px;margin-bottom:24px}
+.meta{color:#7c8794;font-size:12px}
+.top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;
+     flex-wrap:wrap;margin-bottom:24px}
+.langbar{display:flex;border:1px solid #2b3038;border-radius:999px;overflow:hidden;
+         background:#1b1e24;flex:none}
+.langbar button{appearance:none;-webkit-appearance:none;border:0;background:transparent;
+                color:#8a94a0;font:12px/1 inherit;padding:8px 14px;cursor:pointer}
+.langbar button.on{background:#2b3752;color:#cfe0f3}
+.langbar button:hover{color:#dde2e8}
+.langbar button:focus-visible{outline:2px solid #79a6d2;outline-offset:-2px}
+.hint{color:#5f6874;margin-left:8px}
+.mtnote{color:#5f6874;font-size:11px;margin:0 0 20px}
+html[data-lang="ko"] .lg-en{display:none}
+html[data-lang="en"] .lg-ko{display:none}
 h2{font-size:15px;margin:32px 0 10px;padding-bottom:6px;border-bottom:1px solid #2b3038;
    color:#9fd39f}
 .summary{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px}
@@ -270,46 +325,119 @@ a{color:#79a6d2}
 @media (max-width:640px){body{padding:20px 14px 48px}.rev{margin-left:0;width:100%}}
 """
 
+# Restores the reader's choice before the first paint, so switching to English
+# once sticks for every later report too.
+_BOOT_JS = """
+try{var l=localStorage.getItem('comfy-report-lang');
+if(l==='ko'||l==='en'){var r=document.documentElement;
+r.setAttribute('data-lang',l);r.setAttribute('lang',l);}}catch(e){}
+"""
 
-def render_html(d, generated_at=None, title="ComfyUI update report"):
+_TOGGLE_JS = """
+(function(){
+var root=document.documentElement;
+var buttons=document.querySelectorAll('.langbtn');
+function set(lang){
+  root.setAttribute('data-lang',lang);
+  root.setAttribute('lang',lang);
+  var title=root.getAttribute('data-title-'+lang);
+  if(title){document.title=title;}
+  for(var i=0;i<buttons.length;i++){
+    var on=buttons[i].getAttribute('data-set')===lang;
+    buttons[i].className='langbtn'+(on?' on':'');
+    buttons[i].setAttribute('aria-pressed',on?'true':'false');
+  }
+  try{localStorage.setItem('comfy-report-lang',lang);}catch(e){}
+}
+for(var i=0;i<buttons.length;i++){
+  buttons[i].addEventListener('click',function(){set(this.getAttribute('data-set'));});
+}
+document.addEventListener('keydown',function(e){
+  if(e.ctrlKey||e.altKey||e.metaKey){return;}
+  var tag=((e.target&&e.target.tagName)||'').toLowerCase();
+  if(tag==='input'||tag==='textarea'||tag==='select'){return;}
+  if((e.key||'').toLowerCase()==='l'){
+    set(root.getAttribute('data-lang')==='en'?'ko':'en');
+  }
+});
+set(root.getAttribute('data-lang')||'ko');
+})();
+"""
+
+
+def _lang_buttons(lang):
+    return '<div class="langbar" role="group" aria-label="language">' + "".join(
+        '<button type="button" class="langbtn{}" data-set="{}" aria-pressed="{}">{}'
+        "</button>".format(" on" if code == lang else "", code,
+                           "true" if code == lang else "false",
+                           _esc(i18n.LANG_LABELS[code]))
+        for code in i18n.LANGS) + "</div>"
+
+
+def has_translation(d):
+    """True once any commit carries a Korean subject."""
+    for entry in ([d["core"]] if d.get("core") else []) + (d.get("nodes_changed") or []):
+        for commit in entry.get("commits") or []:
+            if commit.get("subject_ko"):
+                return True
+    return False
+
+
+def render_html(d, generated_at=None, lang=i18n.DEFAULT_LANG):
+    """The report page. Both languages are in the file; a button picks one."""
+    lang = i18n.normalize(lang)
+    title_ko, title_en = i18n.both("title")
+    title = title_ko if lang == "ko" else title_en
+
     parts = ["<!doctype html>",
-             '<html lang="en"><head><meta charset="utf-8">',
+             '<html lang="{0}" data-lang="{0}" data-title-ko="{1}" data-title-en="{2}">'
+             .format(lang, _esc(title_ko), _esc(title_en)),
+             '<head><meta charset="utf-8">',
              '<meta name="viewport" content="width=device-width,initial-scale=1">',
-             "<title>" + _esc(title) + "</title><style>" + _CSS + "</style></head><body>",
-             "<h1>" + _esc(title) + "</h1>",
-             '<div class="meta">' + _esc(generated_at or "") + "</div>"]
+             "<title>" + _esc(title) + "</title>",
+             "<style>" + _CSS + "</style>",
+             "<script>" + _BOOT_JS + "</script>",
+             "</head><body>",
+             '<header class="top"><div><h1>' + _s("title") + "</h1>"
+             + '<div class="meta">' + _esc(generated_at or "")
+             + '<span class="hint">' + _s("lang_hint") + "</span></div></div>"
+             + _lang_buttons(lang) + "</header>"]
+
+    if has_translation(d):
+        parts.append('<p class="mtnote lg-ko">' + _esc(i18n.t("mt_note", "ko")) + "</p>")
 
     if not d["has_changes"]:
-        parts.append('<p class="none">No changes since the last report.</p>')
+        parts.append('<p class="none">' + _s("no_changes") + "</p>")
+        parts.append("<script>" + _TOGGLE_JS + "</script>")
         parts.append("</body></html>")
         return "\n".join(parts)
 
     core = d["core"]
     core_count = len(core.get("commits") or []) if core else 0
     risky_count = len([p for p in d["packages_changed"] if p.get("risky")])
-    cards = [("core commits", core_count, False),
-             ("nodes changed", len(d["nodes_changed"]), False),
-             ("nodes added", len(d["nodes_added"]), False),
-             ("nodes removed", len(d["nodes_removed"]), False),
-             ("packages changed", len(d["packages_changed"]), False),
-             ("risky packages", risky_count, risky_count > 0)]
+    cards = [("card_core_commits", core_count, False),
+             ("card_nodes_changed", len(d["nodes_changed"]), False),
+             ("card_nodes_added", len(d["nodes_added"]), False),
+             ("card_nodes_removed", len(d["nodes_removed"]), False),
+             ("card_packages_changed", len(d["packages_changed"]), False),
+             ("card_risky", risky_count, risky_count > 0)]
     parts.append('<div class="summary">' + "".join(
         '<div class="card{}"><b>{}</b><span>{}</span></div>'.format(
-            " warn" if warn else "", value, _esc(label)) for label, value, warn in cards)
+            " warn" if warn else "", value, _s(key)) for key, value, warn in cards)
         + "</div>")
 
     if core:
-        parts.append("<h2>ComfyUI core</h2>")
+        parts.append("<h2>" + _s("sec_core") + "</h2>")
         parts.append(_entry_block(dict(core, name="ComfyUI", kind="git"), "core"))
 
     if d["nodes_changed"]:
-        parts.append("<h2>Updated nodes ({})</h2>".format(len(d["nodes_changed"])))
+        parts.append("<h2>" + _s("sec_nodes_changed", n=len(d["nodes_changed"])) + "</h2>")
         parts += [_entry_block(n, n.get("kind") or "cnr") for n in d["nodes_changed"]]
 
-    for key, heading in (("nodes_added", "Newly installed nodes"),
-                         ("nodes_removed", "Removed nodes")):
+    for key, heading in (("nodes_added", "sec_nodes_added"),
+                         ("nodes_removed", "sec_nodes_removed")):
         if d[key]:
-            parts.append("<h2>{} ({})</h2>".format(heading, len(d[key])))
+            parts.append("<h2>" + _s(heading, n=len(d[key])) + "</h2>")
             parts.append('<div class="chips">' + "".join(
                 '<div class="chip">{} <span class="rev">{}</span></div>'.format(
                     _esc(n["name"]), _esc(n.get("new") or n.get("old") or ""))
@@ -322,17 +450,18 @@ def render_html(d, generated_at=None, title="ComfyUI update report"):
                         "<td>{}</td></tr>".format(
                             cls, _esc(p["name"]), _esc(p["old"]), _esc(p["new"])))
     for p in d["packages_added"]:
-        pkg_rows.append('<tr class="pkg"><td>{}</td><td class="none">(new)</td>'
+        pkg_rows.append('<tr class="pkg"><td>{}</td><td class="none">{}</td>'
                         "<td>&rarr;</td><td>{}</td></tr>".format(
-                            _esc(p["name"]), _esc(p["new"])))
+                            _esc(p["name"]), _s("pkg_new"), _esc(p["new"])))
     for p in d["packages_removed"]:
         pkg_rows.append('<tr class="pkg"><td>{}</td><td>{}</td><td>&rarr;</td>'
-                        '<td class="none">(removed)</td></tr>'.format(
-                            _esc(p["name"]), _esc(p["old"])))
+                        '<td class="none">{}</td></tr>'.format(
+                            _esc(p["name"]), _esc(p["old"]), _s("pkg_removed")))
     if pkg_rows:
-        parts.append("<h2>Python packages ({})</h2>".format(len(pkg_rows)))
+        parts.append("<h2>" + _s("sec_packages", n=len(pkg_rows)) + "</h2>")
         parts.append('<table class="pkgs">' + "".join(pkg_rows) + "</table>")
 
+    parts.append("<script>" + _TOGGLE_JS + "</script>")
     parts.append("</body></html>")
     return "\n".join(parts)
 
@@ -516,16 +645,115 @@ def _save_state(path, state):
     os.replace(tmp, path)
 
 
-USAGE = """ComfyUI update report {version}
+USAGE_EN = """ComfyUI update report {version}
 
   update_report.py [options]
 
-  --comfy PATH   path to the ComfyUI directory (auto-detected otherwise)
-  --baseline     overwrite the snapshot without reporting
-  --no-open      do not open the HTML report in a browser
-  --no-color     plain console output
-  --help         this message
+  --comfy PATH     path to the ComfyUI directory (auto-detected otherwise)
+  --lang ko|en     console language, and the language the report opens in
+                   (default: ko)
+  --baseline       overwrite the snapshot without reporting
+  --no-open        do not open the HTML report in a browser
+  --no-color       plain console output
+  --no-translate   do not translate commit subjects into Korean
+  --llm URL        OpenAI-compatible endpoint for the translation
+                   (default: LM Studio, llama.cpp and Ollama, in that order)
+  --llm-model ID   model to translate with (default: whatever is loaded)
+  --llm-key KEY    API key, if the server wants one (LM Studio does when its
+                   local API token is on). Also read from COMFY_REPORT_LLM_KEY,
+                   LM_API_TOKEN or OPENAI_API_KEY.
+  --help           this message
+
+  Settings can also live in _update-report/config.json:
+  {{"lang": "ko", "translate": true, "llm_url": null, "llm_model": null,
+    "llm_key": null}}
 """
+
+USAGE_KO = """ComfyUI 업데이트 리포트 {version}
+
+  update_report.py [옵션]
+
+  --comfy 경로     ComfyUI 폴더 경로 (기본: 자동 탐지)
+  --lang ko|en     콘솔 언어이자 리포트가 처음 열릴 때의 언어 (기본: ko)
+  --baseline       리포트 없이 기준점만 새로 저장
+  --no-open        HTML 리포트를 브라우저로 열지 않음
+  --no-color       색 없는 콘솔 출력
+  --no-translate   커밋 제목을 한글로 번역하지 않음
+  --llm URL        번역에 쓸 OpenAI 호환 엔드포인트
+                   (기본: LM Studio → llama.cpp → Ollama 순으로 탐색)
+  --llm-model ID   번역에 쓸 모델 (기본: 로드되어 있는 모델)
+  --llm-key KEY    서버가 API 키를 요구할 때 (LM Studio 는 로컬 API 토큰을
+                   켜두면 요구합니다). COMFY_REPORT_LLM_KEY, LM_API_TOKEN,
+                   OPENAI_API_KEY 환경변수로도 읽습니다.
+  --help           이 도움말
+
+  _update-report/config.json 에 설정을 넣어둘 수도 있습니다:
+  {{"lang": "ko", "translate": true, "llm_url": null, "llm_model": null,
+    "llm_key": null}}
+"""
+
+
+def load_config(path):
+    """Optional settings file next to the script; absent or broken -> {}."""
+    try:
+        with io.open(path, encoding="utf-8") as fh:
+            body = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _opt(argv, name, default=None):
+    """The value after `--name`, or default."""
+    if name in argv:
+        index = argv.index(name) + 1
+        if index < len(argv):
+            return argv[index]
+    return default
+
+
+def resolve_options(argv, config, env=None):
+    """Command line beats environment beats config.json beats the defaults."""
+    env = os.environ if env is None else env
+
+    lang = _opt(argv, "--lang") or env.get("COMFY_REPORT_LANG") or config.get("lang")
+    translate_on = config.get("translate", True)
+    if env.get("COMFY_REPORT_TRANSLATE", "").strip().lower() in ("0", "off", "false", "no"):
+        translate_on = False
+    if "--no-translate" in argv:
+        translate_on = False
+
+    url = _opt(argv, "--llm") or env.get("COMFY_REPORT_LLM") or config.get("llm_url")
+    model = (_opt(argv, "--llm-model") or env.get("COMFY_REPORT_LLM_MODEL")
+             or config.get("llm_model"))
+    key = (_opt(argv, "--llm-key") or translate.key_from_env(env)
+           or config.get("llm_key"))
+    return {
+        "lang": i18n.normalize(lang),
+        "translate": bool(translate_on),
+        "llm_url": url or None,
+        "llm_model": model or None,
+        "llm_key": key or None,
+    }
+
+
+def translate_commits(d, options, cache_path):
+    """Korean subjects onto the diff.
+
+    Returns (count, model, needs_key). Never raises: a report without Korean
+    commit subjects is still a report.
+    """
+    if not options["translate"]:
+        return 0, None, False
+    endpoints = [options["llm_url"]] if options["llm_url"] else None
+    translator = translate.Translator(cache_path=cache_path, endpoints=endpoints,
+                                      model=options["llm_model"],
+                                      key=options.get("llm_key"))
+    try:
+        count = translate.apply_to_diff(d, translator)
+    except Exception:
+        return 0, None, False
+    return count, translator.used_model, translator.needs_key
 
 
 def main(argv=None):
@@ -535,11 +763,15 @@ def main(argv=None):
     except Exception:
         pass
 
+    here = os.path.dirname(os.path.abspath(__file__))
+    options = resolve_options(argv, load_config(os.path.join(here, "config.json")))
+    lang = options["lang"]
+
     if "--help" in argv or "-h" in argv:
-        print(USAGE.format(version=__version__))
+        usage = USAGE_KO if lang == "ko" else USAGE_EN
+        print(usage.format(version=__version__))
         return 0
 
-    here = os.path.dirname(os.path.abspath(__file__))
     if "--comfy" in argv:
         comfy_dir = os.path.abspath(argv[argv.index("--comfy") + 1])
     else:
@@ -547,8 +779,8 @@ def main(argv=None):
 
     color = "--no-color" not in argv
     if not comfy_dir or not os.path.isdir(os.path.join(comfy_dir, "custom_nodes")):
-        print(_c("r", "[ERROR] Could not find a ComfyUI directory near " + here, color))
-        print("        Pass it explicitly:  update_report.py --comfy <path to ComfyUI>")
+        print(_c("r", i18n.t("c_no_comfy", lang, path=here), color))
+        print(i18n.t("c_no_comfy_hint", lang))
         return 2
 
     state_path = os.path.join(here, "state.json")
@@ -560,23 +792,28 @@ def main(argv=None):
 
     if old_state is None or "--baseline" in argv:
         _save_state(state_path, new_state)
-        print("\n" + _c("g", ":::::::::::  ComfyUI update report  :::::::::::", color))
-        print("  Baseline saved. The next run will show what changed.")
+        print("\n" + _c("g", ":::::::::::  " + i18n.t("title", lang)
+                        + "  :::::::::::", color))
+        print("  " + i18n.t("c_baseline", lang))
         print("  ComfyUI: {}".format(comfy_dir))
-        print("  Recorded {} nodes / {} packages\n".format(
-            len(new_state["nodes"]), len(new_state["packages"])))
+        print("  " + i18n.t("c_recorded", lang, nodes=len(new_state["nodes"]),
+                            packages=len(new_state["packages"])) + "\n")
         return 0
 
     d = diff_state(old_state, new_state)
     enrich_commits(d, comfy_dir)
+    translated, model, needs_key = translate_commits(
+        d, options, os.path.join(here, "translations.json"))
 
     now = datetime.now()
     report_path = os.path.join(reports_dir, now.strftime("%Y-%m-%d_%H%M") + ".html")
     with io.open(report_path, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(render_html(d, generated_at=now.strftime("%Y-%m-%d %H:%M")))
+        fh.write(render_html(d, generated_at=now.strftime("%Y-%m-%d %H:%M"), lang=lang))
 
     print(render_console(d, report_path=report_path if d["has_changes"] else None,
-                         generated_at=now.strftime("%Y-%m-%d %H:%M"), color=color))
+                         generated_at=now.strftime("%Y-%m-%d %H:%M"), color=color,
+                         lang=lang, translated=translated, model=model,
+                         needs_key=needs_key))
     _save_state(state_path, new_state)
 
     if d["has_changes"] and "--no-open" not in argv:

@@ -2,6 +2,7 @@
 """Tests for update_report.py -- run with: python test_update_report.py"""
 import io
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -9,6 +10,8 @@ import unittest
 # An embedded python (._pth) does not put the script directory on sys.path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import i18n
+import translate as translate_module
 import update_report
 from update_report import (collect_nodes, collect_packages, compare_url, diff_state,
                            enrich_commits, find_comfy_dir, parse_git_log,
@@ -209,7 +212,7 @@ class RenderConsole(unittest.TestCase):
     def test_shows_core_transition_with_commit_count(self):
         out = render_console(diff(core={
             "old": "d8e7bbc", "new": "a91f2c4", "remote": None,
-            "commits": [{"sha": "x", "date": "d", "subject": "s"}] * 12}))
+            "commits": [{"sha": "x", "date": "d", "subject": "s"}] * 12}), lang="en")
         self.assertIn("d8e7bbc", out)
         self.assertIn("a91f2c4", out)
         self.assertIn("12 commits", out)
@@ -218,7 +221,7 @@ class RenderConsole(unittest.TestCase):
         out = render_console(diff(
             nodes_changed=[{"name": "a", "kind": "git", "old": "1", "new": "2", "remote": None}],
             nodes_added=[{"name": "b", "kind": "cnr", "new": "0.1", "remote": None}],
-            nodes_removed=[{"name": "c", "kind": "git", "old": "9"}]))
+            nodes_removed=[{"name": "c", "kind": "git", "old": "9"}]), lang="en")
         self.assertIn("changed 1 / added 1 / removed 1", out)
 
     def test_names_risky_package_change_in_summary(self):
@@ -234,7 +237,7 @@ class RenderConsole(unittest.TestCase):
         self.assertNotIn("rich", out)
 
     def test_reports_no_changes(self):
-        self.assertIn("No changes", render_console(diff()))
+        self.assertIn("No changes", render_console(diff(), lang="en"))
 
     def test_includes_report_path_when_given(self):
         out = render_console(diff(core={"old": "a", "new": "b", "remote": None, "commits": []}),
@@ -246,7 +249,7 @@ class RenderConsole(unittest.TestCase):
             core={"old": "a", "new": "b", "remote": None, "commits": []},
             nodes_changed=[{"name": "n", "kind": "git", "old": "1", "new": "2", "remote": None}],
             packages_changed=[{"name": "av", "old": "1", "new": "2", "risky": True}]),
-            report_path="r.html")
+            report_path="r.html", lang="en")
         out.encode("ascii")
 
 
@@ -292,6 +295,226 @@ class RenderHtml(unittest.TestCase):
 
     def test_states_when_nothing_changed(self):
         self.assertIn("No changes", render_html(diff()))
+
+
+class ConsoleLanguage(unittest.TestCase):
+    def test_defaults_to_korean(self):
+        self.assertIn("지난 리포트", render_console(diff()))
+
+    def test_switches_to_english_on_request(self):
+        self.assertIn("No changes", render_console(diff(), lang="en"))
+
+    def test_unknown_language_falls_back_to_korean(self):
+        self.assertIn("지난 리포트", render_console(diff(), lang="fr"))
+
+    def test_pads_a_korean_label_for_double_width_glyphs(self):
+        out = render_console(diff(core={"old": "a", "new": "b", "remote": None,
+                                        "commits": []}))
+        self.assertIn("  코어        ", out)  # 4 columns of label + 8 spaces
+
+    def test_reports_the_translation_count_when_there_was_one(self):
+        out = render_console(diff(core={"old": "a", "new": "b", "remote": None,
+                                        "commits": []}),
+                             translated=7, model="qwen3")
+        self.assertIn("7", out)
+        self.assertIn("qwen3", out)
+
+    def test_says_the_server_wanted_a_key(self):
+        out = render_console(diff(core={"old": "a", "new": "b", "remote": None,
+                                        "commits": []}), needs_key=True)
+        self.assertIn("API", out)
+
+    def test_says_nothing_about_translation_when_there_was_none(self):
+        out = render_console(diff(core={"old": "a", "new": "b", "remote": None,
+                                        "commits": []}))
+        self.assertNotIn("번역", out)
+
+
+def commit(subject, korean=None):
+    entry = {"sha": "c1", "date": "2026-09-04", "subject": subject}
+    if korean:
+        entry["subject_ko"] = korean
+    return entry
+
+
+def core_with(*commits):
+    return {"old": "aaa", "new": "bbb", "remote": None, "commits": list(commits)}
+
+
+class RenderHtmlLanguage(unittest.TestCase):
+    def test_opens_in_korean_by_default(self):
+        self.assertIn('data-lang="ko"', render_html(diff()))
+
+    def test_opens_in_english_when_asked(self):
+        self.assertIn('data-lang="en"', render_html(diff(), lang="en"))
+
+    def test_ships_both_languages_whichever_it_opens_in(self):
+        for lang in ("ko", "en"):
+            page = render_html(diff(nodes_changed=[
+                {"name": "n", "kind": "cnr", "old": "1", "new": "2", "remote": None}]),
+                lang=lang)
+            self.assertIn("업데이트된 노드", page)
+            self.assertIn("Updated nodes", page)
+
+    def test_offers_a_button_for_each_language(self):
+        page = render_html(diff())
+        self.assertIn('data-set="ko"', page)
+        self.assertIn('data-set="en"', page)
+
+    def test_marks_the_language_the_page_opens_in(self):
+        self.assertIn('class="langbtn on" data-set="ko"', render_html(diff()))
+        self.assertIn('class="langbtn on" data-set="en"',
+                      render_html(diff(), lang="en"))
+
+    def test_binds_the_toggle_to_the_l_key(self):
+        self.assertIn("toLowerCase()==='l'", render_html(diff()))
+
+    def test_keeps_the_toggle_on_a_page_with_no_changes(self):
+        page = render_html(diff())
+        self.assertIn('data-set="en"', page)
+        self.assertIn("바뀐 것이 없습니다", page)
+        self.assertIn("No changes", page)
+
+    def test_shows_a_translated_subject_beside_the_original(self):
+        page = render_html(diff(core=core_with(
+            commit("Support HDR video saving", "HDR 비디오 저장 지원"))))
+        self.assertIn('<span class="lg-ko">HDR 비디오 저장 지원</span>', page)
+        self.assertIn('<span class="lg-en">Support HDR video saving</span>', page)
+
+    def test_writes_an_untranslated_subject_only_once(self):
+        page = render_html(diff(core=core_with(commit("Fix a memory leak"))))
+        self.assertEqual(page.count("Fix a memory leak"), 1)
+
+    def test_escapes_a_translated_subject(self):
+        page = render_html(diff(core=core_with(commit("x", "<b>번역</b>"))))
+        self.assertNotIn("<b>번역</b>", page)
+        self.assertIn("&lt;b&gt;", page)
+
+    def test_notes_machine_translation_when_a_subject_was_translated(self):
+        page = render_html(diff(core=core_with(commit("x", "엑스"))))
+        self.assertIn("자동 번역", page)
+
+    def test_says_nothing_about_machine_translation_otherwise(self):
+        page = render_html(diff(core=core_with(commit("x"))))
+        self.assertNotIn("자동 번역", page)
+
+    def test_translates_the_package_state_words(self):
+        page = render_html(diff(packages_added=[{"name": "rich", "new": "14.0"}],
+                                packages_removed=[{"name": "old", "old": "1.0"}]))
+        for text in ("(신규)", "(new)", "(제거됨)", "(removed)"):
+            self.assertIn(text, page)
+
+    def test_titles_the_page_in_both_languages(self):
+        page = render_html(diff())
+        self.assertIn('data-title-ko="ComfyUI 업데이트 리포트"', page)
+        self.assertIn('data-title-en="ComfyUI update report"', page)
+
+
+class ResolveOptions(unittest.TestCase):
+    def resolve(self, argv=(), config=None, env=None):
+        return update_report.resolve_options(list(argv), config or {}, env or {})
+
+    def test_defaults_to_korean_with_translation_on(self):
+        options = self.resolve()
+        self.assertEqual(options["lang"], "ko")
+        self.assertTrue(options["translate"])
+
+    def test_reads_the_language_from_the_command_line(self):
+        self.assertEqual(self.resolve(["--lang", "en"])["lang"], "en")
+
+    def test_reads_the_language_from_the_config_file(self):
+        self.assertEqual(self.resolve(config={"lang": "en"})["lang"], "en")
+
+    def test_command_line_beats_the_config_file(self):
+        self.assertEqual(self.resolve(["--lang", "ko"], {"lang": "en"})["lang"], "ko")
+
+    def test_environment_beats_the_config_file(self):
+        options = self.resolve(config={"lang": "ko"}, env={"COMFY_REPORT_LANG": "en"})
+        self.assertEqual(options["lang"], "en")
+
+    def test_no_translate_turns_translation_off(self):
+        self.assertFalse(self.resolve(["--no-translate"])["translate"])
+
+    def test_config_can_turn_translation_off(self):
+        self.assertFalse(self.resolve(config={"translate": False})["translate"])
+
+    def test_environment_can_turn_translation_off(self):
+        options = self.resolve(env={"COMFY_REPORT_TRANSLATE": "0"})
+        self.assertFalse(options["translate"])
+
+    def test_reads_the_llm_endpoint_and_model(self):
+        options = self.resolve(["--llm", "http://x/v1", "--llm-model", "m"])
+        self.assertEqual(options["llm_url"], "http://x/v1")
+        self.assertEqual(options["llm_model"], "m")
+
+    def test_reads_the_llm_key_from_the_command_line(self):
+        self.assertEqual(self.resolve(["--llm-key", "sk-1"])["llm_key"], "sk-1")
+
+    def test_reads_the_llm_key_from_the_environment(self):
+        options = self.resolve(env={"LM_API_TOKEN": "sk-2"})
+        self.assertEqual(options["llm_key"], "sk-2")
+
+    def test_reads_the_llm_key_from_the_config_file(self):
+        self.assertEqual(self.resolve(config={"llm_key": "sk-3"})["llm_key"], "sk-3")
+
+    def test_has_no_llm_key_by_default(self):
+        self.assertIsNone(self.resolve()["llm_key"])
+
+    def test_a_dangling_option_does_not_crash(self):
+        self.assertEqual(self.resolve(["--lang"])["lang"], "ko")
+
+
+class TranslateCommits(unittest.TestCase):
+    def options(self, **over):
+        base = {"lang": "ko", "translate": True, "llm_url": None, "llm_model": None}
+        base.update(over)
+        return base
+
+    def test_does_nothing_when_translation_is_off(self):
+        d = diff(core=core_with(commit("x")))
+        self.assertEqual(
+            update_report.translate_commits(d, self.options(translate=False), None),
+            (0, None, False))
+        self.assertNotIn("subject_ko", d["core"]["commits"][0])
+
+    def test_survives_a_translator_that_explodes(self):
+        def boom(*args, **kwargs):
+            raise RuntimeError("no server, no mercy")
+
+        d = diff(core=core_with(commit("x")))
+        original = translate_module.apply_to_diff
+        translate_module.apply_to_diff = boom
+        try:
+            self.assertEqual(update_report.translate_commits(d, self.options(), None),
+                             (0, None, False))
+        finally:
+            translate_module.apply_to_diff = original
+
+
+class LoadConfig(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "config.json")
+
+    def write(self, text):
+        with io.open(self.path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_reads_a_settings_file(self):
+        self.write('{"lang": "en"}')
+        self.assertEqual(update_report.load_config(self.path), {"lang": "en"})
+
+    def test_a_missing_file_is_no_settings(self):
+        self.assertEqual(update_report.load_config(self.path), {})
+
+    def test_broken_json_is_no_settings(self):
+        self.write("{not json")
+        self.assertEqual(update_report.load_config(self.path), {})
+
+    def test_a_json_list_is_no_settings(self):
+        self.write("[1, 2]")
+        self.assertEqual(update_report.load_config(self.path), {})
 
 
 class CollectPackages(unittest.TestCase):
